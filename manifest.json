@@ -1,0 +1,10 @@
+{
+  "domain": "babel_gas",
+  "name": "Babel Gas Monitor",
+  "version": "1.0.0",
+  "documentation": "https://github.com/your-repo",
+  "requirements": ["aiohttp"],
+  "dependencies": [],
+  "codeowners": ["@your_github"],
+  "iot_class": "cloud_polling"
+}
