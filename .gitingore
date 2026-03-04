@@ -1,0 +1,19 @@
+# 忽略操作系统自动生成的文件
+.DS_Store
+Thumbs.db
+
+# 忽略编译产生的文件夹
+__pycache__/
+node_modules/
+dist/
+build/
+*.pyc
+
+# 忽略环境配置或敏感文件
+.env
+secrets.yaml
+config.yaml
+
+# 忽略日志文件
+*.log
+logs/
