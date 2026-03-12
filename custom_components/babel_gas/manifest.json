@@ -1,10 +1,11 @@
 {
   "domain": "babel_gas",
-  "name": "Babel Gas Monitor",
+  "name": "武汉天燃气",
   "version": "1.0.0",
-  "documentation": "https://github.com/your-repo",
+  "documentation": "https://github.com/brick713/WuHanGasBill",
   "requirements": ["aiohttp"],
   "dependencies": [],
-  "codeowners": ["@your_github"],
+  "config_flow": true,
+  "codeowners": ["@brick713"],
   "iot_class": "cloud_polling"
 }
