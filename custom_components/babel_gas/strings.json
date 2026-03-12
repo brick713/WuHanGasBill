@@ -1,0 +1,23 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "设置武汉天燃气账户",
+        "description": "请输入您的天燃气账户信息。\n\n**如何找到这些信息：**\n1. 打开武汉天燃气小程序\n2. 在个人中心或账户信息页面查找\n3. 通过抓包工具获取token\n\n**参数说明：**\n- 账户号 (userno): 10位数字账户号\n- 会员ID (member_id): 通常在URL或API请求中获取\n- Token: 从请求头中获取，格式为: 0fGS7ML2mBIFQn7ruUtaL09KvwJ9r0yLziVO2XBxJaSsSZHILgfZC0oH1Qq2XR8cz8HjBYH4+HrAlwZ86nr0kw==",
+        "data": {
+          "userno": "账户号 (userno)",
+          "member_id": "会员ID (member_id)",
+          "token": "API Token"
+        }
+      }
+    },
+    "error": {
+      "invalid_account": "账户号无效，请输入至少8位数字",
+      "invalid_member_id": "会员ID无效，请检查输入",
+      "invalid_token": "Token无效，请检查输入"
+    },
+    "abort": {
+      "already_configured": "此账户已配置"
+    }
+  }
+}
