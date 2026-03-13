@@ -40,8 +40,8 @@ class WuhanGasSensor(CoordinatorEntity, SensorEntity):
         self._coordinator = coordinator
         self._attr_device_info = {
             "identifiers": {(DOMAIN, config_entry.entry_id)},
-            "name": f"武汉天燃气 {coordinator.userno}",
-            "manufacturer": "武汉天燃气",
+            "name": f"武汉天然气 {coordinator.userno}",
+            "manufacturer": "武汉天然气",
             "model": "燃气账户",
         }
     
@@ -69,7 +69,7 @@ class WuhanGasBalanceSensor(WuhanGasSensor):
     _attr_unique_id = "balance"
     _attr_native_unit_of_measurement = "元"
     _attr_device_class = SensorDeviceClass.MONETARY
-    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_state_class = SensorStateClass.TOTAL
     _attr_suggested_display_precision = 2
     
     @property
@@ -126,7 +126,7 @@ class WuhanGasLastMonthBillSensor(WuhanGasSensor):
     _attr_unique_id = "last_month_bill"
     _attr_native_unit_of_measurement = "元"
     _attr_device_class = SensorDeviceClass.MONETARY
-    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_state_class = None
     _attr_suggested_display_precision = 2
     
     @property
@@ -148,5 +148,4 @@ class WuhanGasLastMonthBillSensor(WuhanGasSensor):
     
     @property
     def icon(self):
-        """Return the icon to use in the frontend."""
-        return "mdi:file-document"
+        """Return the icon

@@ -3,6 +3,7 @@
 from datetime import datetime
 import asyncio
 import aiohttp
+import ssl
 import async_timeout
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
@@ -41,6 +42,12 @@ class WuhanGasDataUpdateCoordinator(DataUpdateCoordinator):
             "Referer": "https://servicewechat.com/wxf4b325a5170f136c/51/page-frame.html"
         }
     
+    def _create_ssl_context(self):
+        """Create SSL context with modern TLS protocols."""
+        ssl_context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
+        ssl_context.minimum_version = ssl.TLSVersion.TLSv1_2
+        return ssl_context
+    
     async def _async_update_data(self):
         """Fetch data from API."""
         try:
@@ -76,7 +83,10 @@ class WuhanGasDataUpdateCoordinator(DataUpdateCoordinator):
         
         try:
             headers = self._get_headers()
-            async with aiohttp.ClientSession() as session:
+            ssl_context = self._create_ssl_context()
+            connector = aiohttp.TCPConnector(ssl=ssl_context)
+            
+            async with aiohttp.ClientSession(connector=connector) as session:
                 async with session.post(url, json=payload, headers=headers) as response:
                     if response.status == 200:
                         result = await response.json()
@@ -120,7 +130,10 @@ class WuhanGasDataUpdateCoordinator(DataUpdateCoordinator):
         
         try:
             headers = self._get_headers()
-            async with aiohttp.ClientSession() as session:
+            ssl_context = self._create_ssl_context()
+            connector = aiohttp.TCPConnector(ssl=ssl_context)
+            
+            async with aiohttp.ClientSession(connector=connector) as session:
                 async with session.post(url, json=payload, headers=headers) as response:
                     if response.status == 200:
                         result = await response.json()

@@ -8,6 +8,10 @@ from .coordinator import WuhanGasDataUpdateCoordinator
 
 PLATFORMS = [Platform.SENSOR]
 
+async def async_setup(hass: HomeAssistant, config: dict):
+    """Set up the Wuhan Gas integration from YAML."""
+    return True
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Wuhan Gas from a config entry."""
     
