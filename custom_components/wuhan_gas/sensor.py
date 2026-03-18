@@ -148,4 +148,5 @@ class WuhanGasLastMonthBillSensor(WuhanGasSensor):
     
     @property
     def icon(self):
-        """Return the icon
+        """Return the icon to use in the frontend."""
+        return "mdi:file-document"
