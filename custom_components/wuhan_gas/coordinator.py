@@ -3,10 +3,12 @@
 from datetime import datetime
 import asyncio
 import async_timeout
+import ssl
+import aiohttp
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
-# 导入 Home Assistant 的异步 HTTP 客户端助手
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
+# 导入正确的函数，允许我们传递自定义的连接器
+from homeassistant.helpers.aiohttp_client import async_create_clientsession
 from .const import (
     DOMAIN, LOGGER, DEFAULT_SCAN_INTERVAL,
     API_BASE_URL, API_GET_PERIOD, API_QUERY_DEPT,
@@ -21,7 +23,12 @@ class WuhanGasDataUpdateCoordinator(DataUpdateCoordinator):
         self.userno = config_data["userno"]
         self.member_id = config_data["member_id"]
         self.token = config_data["token"]
-        self.hass = hass  # 保存 hass 引用，用于获取客户端会话
+        self.hass = hass
+        
+        # 在协调器初始化时创建一次自定义的连接器
+        # 这避免了每次请求都新建 SSL 上下文
+        self._connector = self._create_custom_connector()
+        
         self.data = {}
         
         super().__init__(
@@ -30,6 +37,17 @@ class WuhanGasDataUpdateCoordinator(DataUpdateCoordinator):
             name=DOMAIN,
             update_interval=DEFAULT_SCAN_INTERVAL,
         )
+    
+    def _create_custom_connector(self):
+        """创建一个自定义的 TCPConnector，配置为使用 TLSv1.2 及以上协议。"""
+        # 创建 SSL 上下文，设置最低协议版本为 TLSv1.2
+        ssl_context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
+        ssl_context.minimum_version = ssl.TLSVersion.TLSv1_2
+        
+        # 创建并返回一个使用此 SSL 上下文的连接器
+        # 注意：这里创建连接器本身不是阻塞操作，阻塞的证书加载会在后台线程中处理
+        connector = aiohttp.TCPConnector(ssl=ssl_context)
+        return connector
     
     def _get_headers(self):
         """Generate headers with token."""
@@ -78,8 +96,13 @@ class WuhanGasDataUpdateCoordinator(DataUpdateCoordinator):
         
         try:
             headers = self._get_headers()
-            # 使用 Home Assistant 管理的异步客户端会话，避免阻塞 I/O
-            session = async_get_clientsession(self.hass)
+            # 使用自定义连接器创建客户端会话
+            # async_create_clientsession 会处理会话的生命周期，避免资源泄漏
+            session = async_create_clientsession(
+                self.hass,
+                connector=self._connector,
+                auto_cleanup=False  # 我们将手动管理连接器的生命周期
+            )
             
             async with session.post(url, json=payload, headers=headers) as response:
                 if response.status == 200:
@@ -124,8 +147,12 @@ class WuhanGasDataUpdateCoordinator(DataUpdateCoordinator):
         
         try:
             headers = self._get_headers()
-            # 使用 Home Assistant 管理的异步客户端会话，避免阻塞 I/O
-            session = async_get_clientsession(self.hass)
+            # 重用同一个连接器创建会话，提高效率
+            session = async_create_clientsession(
+                self.hass,
+                connector=self._connector,
+                auto_cleanup=False
+            )
             
             async with session.post(url, json=payload, headers=headers) as response:
                 if response.status == 200:
@@ -172,3 +199,8 @@ class WuhanGasDataUpdateCoordinator(DataUpdateCoordinator):
             LOGGER.error("Error fetching bills: %s", err)
         
         return None
+    
+    async def async_shutdown(self):
+        """清理资源，关闭连接器。"""
+        if self._connector:
+            await self._connector.close()
