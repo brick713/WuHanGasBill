@@ -12,7 +12,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from .const import (
     DOMAIN, LOGGER, DEFAULT_SCAN_INTERVAL,
     API_BASE_URL, API_GET_PERIOD, API_QUERY_DEPT,
-    USER_AGENT, DEFAULT_METER_TYPE, DEFAULT_ORG_ID, DEFAULT_TYPE
+    DEFAULT_METER_TYPE, DEFAULT_ORG_ID, DEFAULT_TYPE
 )
 
 
