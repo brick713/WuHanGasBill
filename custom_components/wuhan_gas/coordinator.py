@@ -1,13 +1,14 @@
-"""Data update coordinator for Wuhan Gas (final optimized version)."""
+"""Data update coordinator for Wuhan Gas (production-grade)."""
 
-from datetime import datetime, timedelta
+from datetime import datetime
 import asyncio
 import async_timeout
 import json
 import time
 
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.helpers.event import async_track_time_change
 
 from .const import (
     DOMAIN, LOGGER,
@@ -19,12 +20,12 @@ from .const import (
 # =====================
 # 配置
 # =====================
-UPDATE_INTERVAL = timedelta(minutes=30)   # 更新频率
-CACHE_TTL = 60                            # 缓存秒
+CACHE_TTL = 60  # 秒
+UPDATE_HOURS = [8, 18]  # 每天执行时间
 
 
 class WuhanGasDataUpdateCoordinator(DataUpdateCoordinator):
-    """Wuhan Gas coordinator using curl."""
+    """Production-grade coordinator using curl + scheduled updates."""
 
     def __init__(self, hass: HomeAssistant, config_data: dict) -> None:
         self.hass = hass
@@ -46,14 +47,32 @@ class WuhanGasDataUpdateCoordinator(DataUpdateCoordinator):
             hass,
             LOGGER,
             name=DOMAIN,
-            update_interval=UPDATE_INTERVAL,
+            update_interval=None,  # ❗禁用默认轮询
+        )
+
+        # ✅ 注册每天两次更新
+        self._unsub_timer = async_track_time_change(
+            hass,
+            self._scheduled_update,
+            hour=UPDATE_HOURS,
+            minute=0,
+            second=0,
         )
 
     # =====================
-    # 判断成功
+    # 成功判断
     # =====================
     def _is_success(self, result):
         return str(result.get("code")) == "0"
+
+    # =====================
+    # 定时触发
+    # =====================
+    @callback
+    async def _scheduled_update(self, now: datetime):
+        """Scheduled update twice a day."""
+        LOGGER.debug("Scheduled update triggered at %s", now)
+        await self.async_request_refresh()
 
     # =====================
     # 主更新
@@ -63,7 +82,6 @@ class WuhanGasDataUpdateCoordinator(DataUpdateCoordinator):
 
         # ✅ 命中缓存
         if self._cache_data and (now - self._cache_time < CACHE_TTL):
-            LOGGER.debug("Using cached data")
             return self._cache_data
 
         try:
@@ -229,3 +247,11 @@ class WuhanGasDataUpdateCoordinator(DataUpdateCoordinator):
             LOGGER.error("Bills API error: %s", result)
 
         return None
+
+    # =====================
+    # 清理
+    # =====================
+    async def async_shutdown(self):
+        """Cleanup when integration unloads."""
+        if self._unsub_timer:
+            self._unsub_timer()
