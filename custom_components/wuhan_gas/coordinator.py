@@ -1,13 +1,12 @@
-"""Data update coordinator for Wuhan Gas."""
+"""Data update coordinator for Wuhan Gas (curl version)."""
 
 from datetime import datetime
 import asyncio
 import async_timeout
-import ssl
+import json
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import (
     DOMAIN, LOGGER, DEFAULT_SCAN_INTERVAL,
@@ -16,21 +15,8 @@ from .const import (
 )
 
 
-# =====================
-# SSL（全局复用）
-# =====================
-def _create_ssl_context():
-    ctx = ssl.create_default_context()
-    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
-    ctx.set_ciphers("ECDHE+AESGCM:ECDHE+CHACHA20:!aNULL:!eNULL:!MD5")
-    return ctx
-
-
-SSL_CONTEXT = _create_ssl_context()
-
-
 class WuhanGasDataUpdateCoordinator(DataUpdateCoordinator):
-    """Class to manage fetching Wuhan Gas data."""
+    """Class to manage fetching Wuhan Gas data via curl."""
 
     def __init__(self, hass: HomeAssistant, config_data: dict) -> None:
         self.hass = hass
@@ -38,18 +24,10 @@ class WuhanGasDataUpdateCoordinator(DataUpdateCoordinator):
         self.member_id = config_data["member_id"]
         self.token = config_data["token"]
 
-        # ✅ 复用 session
-        self.session = async_get_clientsession(hass)
-
-        # ✅ headers 只构建一次
+        # headers（复用）
         self.headers = {
-            "Host": "wp.babel-group.cn",
-            "Connection": "keep-alive",
-            "token": self.token,
-            "content-type": "application/json",
-            "Accept-Encoding": "gzip,compress,br,deflate",
             "User-Agent": USER_AGENT,
-            "Referer": "https://servicewechat.com/wxf4b325a5170f136c/51/page-frame.html"
+            "Referer": "https://servicewechat.com/",
         }
 
         super().__init__(
@@ -62,7 +40,7 @@ class WuhanGasDataUpdateCoordinator(DataUpdateCoordinator):
     async def _async_update_data(self):
         """Fetch data from API."""
         try:
-            async with async_timeout.timeout(15):
+            async with async_timeout.timeout(20):
                 return await self._fetch_all_data()
         except asyncio.TimeoutError as err:
             raise UpdateFailed(f"Timeout fetching data: {err}") from err
@@ -70,7 +48,7 @@ class WuhanGasDataUpdateCoordinator(DataUpdateCoordinator):
             raise UpdateFailed(f"Error fetching data: {err}") from err
 
     async def _fetch_all_data(self):
-        """并发获取数据（优化）"""
+        """并发获取数据"""
         balance_task = self._fetch_balance()
         bills_task = self._fetch_annual_bills()
 
@@ -91,23 +69,38 @@ class WuhanGasDataUpdateCoordinator(DataUpdateCoordinator):
         return data
 
     async def _make_api_request(self, url: str, payload: dict):
-        """统一请求方法"""
+        """Use curl to bypass TLS fingerprint detection."""
         try:
-            async with self.session.post(
+            cmd = [
+                "curl",
+                "-s",
                 url,
-                json=payload,
-                headers=self.headers,
-                ssl=SSL_CONTEXT   # ✅ 正确方式
-            ) as response:
+                "-H", f"token: {self.token}",
+                "-H", "content-type: application/json",
+                "-H", f"User-Agent: {self.headers['User-Agent']}",
+                "-H", f"Referer: {self.headers['Referer']}",
+                "--data", json.dumps(payload)
+            ]
 
-                if response.status == 200:
-                    return await response.json()
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
 
-                LOGGER.error("HTTP error %s for URL: %s", response.status, url)
+            stdout, stderr = await proc.communicate()
+
+            if proc.returncode != 0:
+                LOGGER.error("curl failed: %s", stderr.decode())
                 return None
 
+            if not stdout:
+                return None
+
+            return json.loads(stdout)
+
         except Exception as err:
-            LOGGER.error("Request error for URL %s: %s", url, err)
+            LOGGER.error("curl request error %s: %s", url, err)
             return None
 
     async def _fetch_balance(self):
