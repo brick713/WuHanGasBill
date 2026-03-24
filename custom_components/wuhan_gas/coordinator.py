@@ -5,8 +5,6 @@ import asyncio
 import async_timeout
 import ssl
 
-from aiohttp import TCPConnector
-
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -18,22 +16,16 @@ from .const import (
 )
 
 
+# =====================
+# SSL（全局复用）
+# =====================
 def _create_ssl_context():
-    """Create custom SSL context (only once)."""
     ctx = ssl.create_default_context()
-
-    # 强制 TLS1.2+
     ctx.minimum_version = ssl.TLSVersion.TLSv1_2
-
-    # 关键：兼容国内接口常见配置
-    ctx.set_ciphers(
-        "ECDHE+AESGCM:ECDHE+CHACHA20:!aNULL:!eNULL:!MD5"
-    )
-
+    ctx.set_ciphers("ECDHE+AESGCM:ECDHE+CHACHA20:!aNULL:!eNULL:!MD5")
     return ctx
 
 
-# ✅ 全局复用（避免 event loop 问题）
 SSL_CONTEXT = _create_ssl_context()
 
 
@@ -41,26 +33,16 @@ class WuhanGasDataUpdateCoordinator(DataUpdateCoordinator):
     """Class to manage fetching Wuhan Gas data."""
 
     def __init__(self, hass: HomeAssistant, config_data: dict) -> None:
-        """Initialize."""
+        self.hass = hass
         self.userno = config_data["userno"]
         self.member_id = config_data["member_id"]
         self.token = config_data["token"]
-        self.hass = hass
-        self.data = {}
 
-        # ✅ 使用 connector 绑定 SSL（关键）
-        self.connector = TCPConnector(ssl=SSL_CONTEXT)
+        # ✅ 复用 session
+        self.session = async_get_clientsession(hass)
 
-        super().__init__(
-            hass,
-            LOGGER,
-            name=DOMAIN,
-            update_interval=DEFAULT_SCAN_INTERVAL,
-        )
-
-    def _get_headers(self):
-        """Generate headers with token."""
-        return {
+        # ✅ headers 只构建一次
+        self.headers = {
             "Host": "wp.babel-group.cn",
             "Connection": "keep-alive",
             "token": self.token,
@@ -69,6 +51,13 @@ class WuhanGasDataUpdateCoordinator(DataUpdateCoordinator):
             "User-Agent": USER_AGENT,
             "Referer": "https://servicewechat.com/wxf4b325a5170f136c/51/page-frame.html"
         }
+
+        super().__init__(
+            hass,
+            LOGGER,
+            name=DOMAIN,
+            update_interval=DEFAULT_SCAN_INTERVAL,
+        )
 
     async def _async_update_data(self):
         """Fetch data from API."""
@@ -81,32 +70,34 @@ class WuhanGasDataUpdateCoordinator(DataUpdateCoordinator):
             raise UpdateFailed(f"Error fetching data: {err}") from err
 
     async def _fetch_all_data(self):
-        """Fetch all data from APIs."""
+        """并发获取数据（优化）"""
+        balance_task = self._fetch_balance()
+        bills_task = self._fetch_annual_bills()
+
+        balance_data, bills_data = await asyncio.gather(
+            balance_task,
+            bills_task,
+            return_exceptions=True
+        )
+
         data = {}
 
-        balance_data = await self._fetch_balance()
-        if balance_data:
+        if isinstance(balance_data, dict):
             data.update(balance_data)
 
-        bills_data = await self._fetch_annual_bills()
-        if bills_data:
+        if isinstance(bills_data, dict):
             data.update(bills_data)
 
         return data
 
     async def _make_api_request(self, url: str, payload: dict):
-        """Make API request using Home Assistant's managed session."""
+        """统一请求方法"""
         try:
-            headers = self._get_headers()
-
-            # ✅ 使用 HA session
-            session = async_get_clientsession(self.hass)
-
-            async with session.post(
+            async with self.session.post(
                 url,
                 json=payload,
-                headers=headers,
-                connector=self.connector   # 👈 关键修复点
+                headers=self.headers,
+                ssl=SSL_CONTEXT   # ✅ 正确方式
             ) as response:
 
                 if response.status == 200:
@@ -125,22 +116,23 @@ class WuhanGasDataUpdateCoordinator(DataUpdateCoordinator):
         payload = {"member_id": self.member_id}
 
         result = await self._make_api_request(url, payload)
+
         if result and result.get("code") == 0 and "data" in result:
-            balance_str = result["data"].get("user_presave", "0")
+            data = result["data"]
 
             try:
-                balance = float(balance_str) / 100
-            except (ValueError, TypeError):
+                balance = float(data.get("user_presave", 0)) / 100
+            except Exception:
                 balance = 0.0
 
             return {
                 "balance": balance,
-                "user_name": result["data"].get("user_name", ""),
-                "user_addr": result["data"].get("user_addr", ""),
-                "userno": result["data"].get("userno", self.userno)
+                "user_name": data.get("user_name", ""),
+                "user_addr": data.get("user_addr", ""),
+                "userno": data.get("userno", self.userno)
             }
 
-        elif result:
+        if result:
             LOGGER.error("Balance API returned error: %s", result.get("msg"))
 
         return None
@@ -148,10 +140,9 @@ class WuhanGasDataUpdateCoordinator(DataUpdateCoordinator):
     async def _fetch_annual_bills(self):
         """Fetch annual bills."""
         url = f"{API_BASE_URL}{API_GET_PERIOD}"
-        current_year = datetime.now().year
 
         payload = {
-            "year": current_year,
+            "year": datetime.now().year,
             "userno": self.userno,
             "meterType": DEFAULT_METER_TYPE,
             "orgid": DEFAULT_ORG_ID,
@@ -159,27 +150,28 @@ class WuhanGasDataUpdateCoordinator(DataUpdateCoordinator):
         }
 
         result = await self._make_api_request(url, payload)
+
         if result and result.get("code") == 0 and "data" in result:
             bills = result["data"]
 
             annual_total = 0.0
             monthly_bills = {}
+            last_month = ""
             last_month_bill = 0.0
-            last_month = None
 
             for bill in bills:
                 try:
-                    amount = float(bill.get("own_fee", "0"))
+                    amount = float(bill.get("own_fee", 0))
                     month = bill.get("yrmonth", "")
 
                     annual_total += amount
                     monthly_bills[month] = amount
 
-                    if month and (last_month is None or month > last_month):
+                    if month > last_month:
                         last_month = month
                         last_month_bill = amount
 
-                except (ValueError, TypeError):
+                except Exception:
                     continue
 
             return {
@@ -190,7 +182,7 @@ class WuhanGasDataUpdateCoordinator(DataUpdateCoordinator):
                 "all_bills": bills
             }
 
-        elif result:
+        if result:
             LOGGER.error("Bills API returned error: %s", result.get("msg"))
 
         return None
