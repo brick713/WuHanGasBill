@@ -1,22 +1,30 @@
-"""Data update coordinator for Wuhan Gas (curl version)."""
+"""Data update coordinator for Wuhan Gas (final optimized version)."""
 
-from datetime import datetime
+from datetime import datetime, timedelta
 import asyncio
 import async_timeout
 import json
+import time
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .const import (
-    DOMAIN, LOGGER, DEFAULT_SCAN_INTERVAL,
+    DOMAIN, LOGGER,
     API_BASE_URL, API_GET_PERIOD, API_QUERY_DEPT,
     USER_AGENT, DEFAULT_METER_TYPE, DEFAULT_ORG_ID, DEFAULT_TYPE
 )
 
 
+# =====================
+# 配置
+# =====================
+UPDATE_INTERVAL = timedelta(minutes=30)   # 更新频率
+CACHE_TTL = 60                            # 缓存秒
+
+
 class WuhanGasDataUpdateCoordinator(DataUpdateCoordinator):
-    """Class to manage fetching Wuhan Gas data via curl."""
+    """Wuhan Gas coordinator using curl."""
 
     def __init__(self, hass: HomeAssistant, config_data: dict) -> None:
         self.hass = hass
@@ -30,25 +38,61 @@ class WuhanGasDataUpdateCoordinator(DataUpdateCoordinator):
             "Referer": "https://servicewechat.com/",
         }
 
+        # 缓存
+        self._cache_data = None
+        self._cache_time = 0
+
         super().__init__(
             hass,
             LOGGER,
             name=DOMAIN,
-            update_interval=DEFAULT_SCAN_INTERVAL,
+            update_interval=UPDATE_INTERVAL,
         )
 
+    # =====================
+    # 判断成功
+    # =====================
+    def _is_success(self, result):
+        return str(result.get("code")) == "0"
+
+    # =====================
+    # 主更新
+    # =====================
     async def _async_update_data(self):
-        """Fetch data from API."""
+        now = time.time()
+
+        # ✅ 命中缓存
+        if self._cache_data and (now - self._cache_time < CACHE_TTL):
+            LOGGER.debug("Using cached data")
+            return self._cache_data
+
         try:
             async with async_timeout.timeout(20):
-                return await self._fetch_all_data()
-        except asyncio.TimeoutError as err:
-            raise UpdateFailed(f"Timeout fetching data: {err}") from err
-        except Exception as err:
-            raise UpdateFailed(f"Error fetching data: {err}") from err
+                data = await self._fetch_all_data()
 
+                if data:
+                    self._cache_data = data
+                    self._cache_time = now
+                    return data
+
+                # fallback
+                if self._cache_data:
+                    LOGGER.warning("Using stale cache")
+                    return self._cache_data
+
+                raise UpdateFailed("No data")
+
+        except Exception as err:
+            if self._cache_data:
+                LOGGER.warning("Error, using cache: %s", err)
+                return self._cache_data
+
+            raise UpdateFailed(err) from err
+
+    # =====================
+    # 并发请求
+    # =====================
     async def _fetch_all_data(self):
-        """并发获取数据"""
         balance_task = self._fetch_balance()
         bills_task = self._fetch_annual_bills()
 
@@ -68,8 +112,10 @@ class WuhanGasDataUpdateCoordinator(DataUpdateCoordinator):
 
         return data
 
+    # =====================
+    # curl 请求
+    # =====================
     async def _make_api_request(self, url: str, payload: dict):
-        """Use curl to bypass TLS fingerprint detection."""
         try:
             cmd = [
                 "curl",
@@ -103,18 +149,20 @@ class WuhanGasDataUpdateCoordinator(DataUpdateCoordinator):
             LOGGER.error("curl request error %s: %s", url, err)
             return None
 
+    # =====================
+    # 余额
+    # =====================
     async def _fetch_balance(self):
-        """Fetch account balance."""
         url = f"{API_BASE_URL}{API_QUERY_DEPT}"
         payload = {"member_id": self.member_id}
 
         result = await self._make_api_request(url, payload)
 
-        if result and result.get("code") == 0 and "data" in result:
+        if result and self._is_success(result) and "data" in result:
             data = result["data"]
 
             try:
-                balance = float(data.get("user_presave", 0)) / 100
+                balance = float(data.get("user_presave") or 0) / 100
             except Exception:
                 balance = 0.0
 
@@ -126,12 +174,14 @@ class WuhanGasDataUpdateCoordinator(DataUpdateCoordinator):
             }
 
         if result:
-            LOGGER.error("Balance API returned error: %s", result.get("msg"))
+            LOGGER.error("Balance API error: %s", result)
 
         return None
 
+    # =====================
+    # 账单
+    # =====================
     async def _fetch_annual_bills(self):
-        """Fetch annual bills."""
         url = f"{API_BASE_URL}{API_GET_PERIOD}"
 
         payload = {
@@ -144,38 +194,38 @@ class WuhanGasDataUpdateCoordinator(DataUpdateCoordinator):
 
         result = await self._make_api_request(url, payload)
 
-        if result and result.get("code") == 0 and "data" in result:
+        if result and self._is_success(result) and "data" in result:
             bills = result["data"]
 
             annual_total = 0.0
-            monthly_bills = {}
+            monthly = {}
             last_month = ""
-            last_month_bill = 0.0
+            last_value = 0.0
 
-            for bill in bills:
+            for b in bills:
                 try:
-                    amount = float(bill.get("own_fee", 0))
-                    month = bill.get("yrmonth", "")
+                    amount = float(b.get("own_fee") or 0)
+                    month = b.get("yrmonth", "")
 
                     annual_total += amount
-                    monthly_bills[month] = amount
+                    monthly[month] = amount
 
                     if month > last_month:
                         last_month = month
-                        last_month_bill = amount
+                        last_value = amount
 
                 except Exception:
                     continue
 
             return {
                 "annual_total": annual_total,
-                "last_month_bill": last_month_bill,
+                "last_month_bill": last_value,
                 "last_month": last_month,
-                "monthly_bills": monthly_bills,
+                "monthly_bills": monthly,
                 "all_bills": bills
             }
 
         if result:
-            LOGGER.error("Bills API returned error: %s", result.get("msg"))
+            LOGGER.error("Bills API error: %s", result)
 
         return None
