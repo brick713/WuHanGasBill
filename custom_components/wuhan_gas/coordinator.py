@@ -1,61 +1,66 @@
-"""Data update coordinator for Wuhan Gas (optimized with cache)."""
+"""Data update coordinator for Wuhan Gas."""
 
-from datetime import datetime, timedelta
+from datetime import datetime
 import asyncio
 import async_timeout
 import ssl
-import time
 
-from aiohttp import ClientSession
+from aiohttp import TCPConnector
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import (
-    DOMAIN, LOGGER,
+    DOMAIN, LOGGER, DEFAULT_SCAN_INTERVAL,
     API_BASE_URL, API_GET_PERIOD, API_QUERY_DEPT,
     USER_AGENT, DEFAULT_METER_TYPE, DEFAULT_ORG_ID, DEFAULT_TYPE
 )
 
 
-# =====================
-# 全局配置
-# =====================
-UPDATE_INTERVAL = timedelta(minutes=30)   # ✅ 降低请求频率
-CACHE_TTL = 60                            # ✅ 60秒缓存
-
-
-# =====================
-# SSL（只初始化一次）
-# =====================
 def _create_ssl_context():
+    """Create custom SSL context (only once)."""
     ctx = ssl.create_default_context()
+
+    # 强制 TLS1.2+
     ctx.minimum_version = ssl.TLSVersion.TLSv1_2
-    ctx.set_ciphers("ECDHE+AESGCM:ECDHE+CHACHA20:!aNULL:!eNULL:!MD5")
+
+    # 关键：兼容国内接口常见配置
+    ctx.set_ciphers(
+        "ECDHE+AESGCM:ECDHE+CHACHA20:!aNULL:!eNULL:!MD5"
+    )
+
     return ctx
 
 
+# ✅ 全局复用（避免 event loop 问题）
 SSL_CONTEXT = _create_ssl_context()
 
 
-# =====================
-# Coordinator
-# =====================
 class WuhanGasDataUpdateCoordinator(DataUpdateCoordinator):
-    """Efficient Wuhan Gas data coordinator with cache."""
+    """Class to manage fetching Wuhan Gas data."""
 
     def __init__(self, hass: HomeAssistant, config_data: dict) -> None:
-        self.hass = hass
+        """Initialize."""
         self.userno = config_data["userno"]
         self.member_id = config_data["member_id"]
         self.token = config_data["token"]
+        self.hass = hass
+        self.data = {}
 
-        # HA session（复用）
-        self.session: ClientSession = async_get_clientsession(hass)
+        # ✅ 使用 connector 绑定 SSL（关键）
+        self.connector = TCPConnector(ssl=SSL_CONTEXT)
 
-        # headers（只构建一次）
-        self.headers = {
+        super().__init__(
+            hass,
+            LOGGER,
+            name=DOMAIN,
+            update_interval=DEFAULT_SCAN_INTERVAL,
+        )
+
+    def _get_headers(self):
+        """Generate headers with token."""
+        return {
             "Host": "wp.babel-group.cn",
             "Connection": "keep-alive",
             "token": self.token,
@@ -65,175 +70,127 @@ class WuhanGasDataUpdateCoordinator(DataUpdateCoordinator):
             "Referer": "https://servicewechat.com/wxf4b325a5170f136c/51/page-frame.html"
         }
 
-        # ✅ 缓存
-        self._cache_data = None
-        self._cache_time = 0
-
-        super().__init__(
-            hass,
-            LOGGER,
-            name=DOMAIN,
-            update_interval=UPDATE_INTERVAL,
-        )
-
-    # =====================
-    # 主更新入口
-    # =====================
     async def _async_update_data(self):
-        now = time.time()
-
-        # ✅ 命中缓存（避免频繁请求）
-        if self._cache_data and (now - self._cache_time < CACHE_TTL):
-            LOGGER.debug("Using cached data")
-            return self._cache_data
-
+        """Fetch data from API."""
         try:
             async with async_timeout.timeout(15):
-                data = await self._fetch_all_data()
-
-                if data:
-                    # ✅ 更新缓存
-                    self._cache_data = data
-                    self._cache_time = now
-                    return data
-
-                # ⚠️ fallback
-                if self._cache_data:
-                    LOGGER.warning("Using stale cache due to API failure")
-                    return self._cache_data
-
-                raise UpdateFailed("No data received")
-
+                return await self._fetch_all_data()
         except asyncio.TimeoutError as err:
-            if self._cache_data:
-                LOGGER.warning("Timeout, using cache")
-                return self._cache_data
-
-            raise UpdateFailed(f"Timeout: {err}") from err
-
+            raise UpdateFailed(f"Timeout fetching data: {err}") from err
         except Exception as err:
-            if self._cache_data:
-                LOGGER.warning("Error, using cache: %s", err)
-                return self._cache_data
+            raise UpdateFailed(f"Error fetching data: {err}") from err
 
-            raise UpdateFailed(f"Error: {err}") from err
-
-    # =====================
-    # 并发请求
-    # =====================
     async def _fetch_all_data(self):
-        balance_task = self._fetch_balance()
-        bills_task = self._fetch_annual_bills()
-
-        balance_data, bills_data = await asyncio.gather(
-            balance_task,
-            bills_task,
-            return_exceptions=True
-        )
-
+        """Fetch all data from APIs."""
         data = {}
 
-        if isinstance(balance_data, dict):
+        balance_data = await self._fetch_balance()
+        if balance_data:
             data.update(balance_data)
 
-        if isinstance(bills_data, dict):
+        bills_data = await self._fetch_annual_bills()
+        if bills_data:
             data.update(bills_data)
 
         return data
 
-    # =====================
-    # HTTP请求封装
-    # =====================
-    async def _post(self, url: str, payload: dict):
+    async def _make_api_request(self, url: str, payload: dict):
+        """Make API request using Home Assistant's managed session."""
         try:
-            async with self.session.post(
+            headers = self._get_headers()
+
+            # ✅ 使用 HA session
+            session = async_get_clientsession(self.hass)
+
+            async with session.post(
                 url,
                 json=payload,
-                headers=self.headers,
-                ssl=SSL_CONTEXT
-            ) as resp:
+                headers=headers,
+                connector=self.connector   # 👈 关键修复点
+            ) as response:
 
-                if resp.status != 200:
-                    LOGGER.error("HTTP %s: %s", resp.status, url)
-                    return None
+                if response.status == 200:
+                    return await response.json()
 
-                return await resp.json()
+                LOGGER.error("HTTP error %s for URL: %s", response.status, url)
+                return None
 
         except Exception as err:
-            LOGGER.error("Request error %s: %s", url, err)
+            LOGGER.error("Request error for URL %s: %s", url, err)
             return None
 
-    # =====================
-    # 余额
-    # =====================
     async def _fetch_balance(self):
+        """Fetch account balance."""
         url = f"{API_BASE_URL}{API_QUERY_DEPT}"
         payload = {"member_id": self.member_id}
 
-        result = await self._post(url, payload)
+        result = await self._make_api_request(url, payload)
+        if result and result.get("code") == 0 and "data" in result:
+            balance_str = result["data"].get("user_presave", "0")
 
-        if not result or result.get("code") != 0:
-            return None
+            try:
+                balance = float(balance_str) / 100
+            except (ValueError, TypeError):
+                balance = 0.0
 
-        data = result["data"]
+            return {
+                "balance": balance,
+                "user_name": result["data"].get("user_name", ""),
+                "user_addr": result["data"].get("user_addr", ""),
+                "userno": result["data"].get("userno", self.userno)
+            }
 
-        try:
-            balance = float(data.get("user_presave", 0)) / 100
-        except Exception:
-            balance = 0.0
+        elif result:
+            LOGGER.error("Balance API returned error: %s", result.get("msg"))
 
-        return {
-            "balance": balance,
-            "user_name": data.get("user_name", ""),
-            "user_addr": data.get("user_addr", ""),
-            "userno": data.get("userno", self.userno),
-        }
+        return None
 
-    # =====================
-    # 账单
-    # =====================
     async def _fetch_annual_bills(self):
+        """Fetch annual bills."""
         url = f"{API_BASE_URL}{API_GET_PERIOD}"
+        current_year = datetime.now().year
 
         payload = {
-            "year": datetime.now().year,
+            "year": current_year,
             "userno": self.userno,
             "meterType": DEFAULT_METER_TYPE,
             "orgid": DEFAULT_ORG_ID,
             "type": DEFAULT_TYPE
         }
 
-        result = await self._post(url, payload)
+        result = await self._make_api_request(url, payload)
+        if result and result.get("code") == 0 and "data" in result:
+            bills = result["data"]
 
-        if not result or result.get("code") != 0:
-            return None
+            annual_total = 0.0
+            monthly_bills = {}
+            last_month_bill = 0.0
+            last_month = None
 
-        bills = result["data"]
+            for bill in bills:
+                try:
+                    amount = float(bill.get("own_fee", "0"))
+                    month = bill.get("yrmonth", "")
 
-        annual_total = 0.0
-        monthly = {}
-        last_month = ""
-        last_value = 0.0
+                    annual_total += amount
+                    monthly_bills[month] = amount
 
-        for b in bills:
-            try:
-                amount = float(b.get("own_fee", 0))
-                month = b.get("yrmonth", "")
+                    if month and (last_month is None or month > last_month):
+                        last_month = month
+                        last_month_bill = amount
 
-                annual_total += amount
-                monthly[month] = amount
+                except (ValueError, TypeError):
+                    continue
 
-                if month > last_month:
-                    last_month = month
-                    last_value = amount
+            return {
+                "annual_total": annual_total,
+                "last_month_bill": last_month_bill,
+                "last_month": last_month,
+                "monthly_bills": monthly_bills,
+                "all_bills": bills
+            }
 
-            except Exception:
-                continue
+        elif result:
+            LOGGER.error("Bills API returned error: %s", result.get("msg"))
 
-        return {
-            "annual_total": annual_total,
-            "last_month_bill": last_value,
-            "last_month": last_month,
-            "monthly_bills": monthly,
-            "all_bills": bills
-        }
+        return None
