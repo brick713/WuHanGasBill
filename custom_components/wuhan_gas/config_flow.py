@@ -32,7 +32,7 @@ class WuhanGasConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 self._abort_if_unique_id_configured()
                 
                 return self.async_create_entry(
-                    title=f"武汉天然气 {user_input[CONF_USERNO]}",
+                    title=f"武汉天燃气 {user_input[CONF_USERNO]}",
                     data=user_input
                 )
         
@@ -47,7 +47,7 @@ class WuhanGasConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             data_schema=data_schema,
             errors=errors,
             description_placeholders={
-                "how_to_find": "在武汉天然气小程序中使用开发者工具或网络抓包获取token"
+                "how_to_find": "在武汉天燃气小程序中使用开发者工具或网络抓包获取token"
             }
         )
     

@@ -40,8 +40,8 @@ class WuhanGasSensor(CoordinatorEntity, SensorEntity):
         self._coordinator = coordinator
         self._attr_device_info = {
             "identifiers": {(DOMAIN, config_entry.entry_id)},
-            "name": f"武汉天然气 {coordinator.userno}",
-            "manufacturer": "武汉天然气",
+            "name": f"武汉天燃气 {coordinator.userno}",
+            "manufacturer": "武汉天燃气",
             "model": "燃气账户",
         }
     
